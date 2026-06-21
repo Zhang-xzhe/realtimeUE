@@ -29,6 +29,7 @@
 #include <srsran/phy/utils/vector.h>
 #include <stdarg.h>
 #include <stdlib.h>
+#include <time.h>
 #include <unistd.h>
 #include <zmq.h>
 
@@ -60,6 +61,10 @@ typedef struct {
 
   // Rx timestamp
   uint64_t next_rx_ts;
+
+  // Time reference for get_time
+  time_t start_sec;
+  long   start_nsec;
 
   pthread_mutex_t tx_config_mutex;
   pthread_mutex_t rx_config_mutex;
@@ -217,6 +222,12 @@ int rf_zmq_open_multi(char* args, void** h, uint32_t nof_channels)
     handler->info.min_tx_gain = ZMQ_MIN_GAIN_DB;
     handler->nof_channels     = nof_channels;
     strcpy(handler->id, "zmq\0");
+
+    // Initialize time reference for rf_zmq_get_time
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    handler->start_sec  = ts.tv_sec;
+    handler->start_nsec = ts.tv_nsec;
 
     rf_zmq_opts_t rx_opts = {};
     rf_zmq_opts_t tx_opts = {};
@@ -578,12 +589,21 @@ double rf_zmq_set_tx_freq(void* h, uint32_t ch, double freq)
 void rf_zmq_get_time(void* h, time_t* secs, double* frac_secs)
 {
   if (h) {
+    rf_zmq_handler_t* handler = (rf_zmq_handler_t*)h;
+
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+
+    // Calculate elapsed seconds since radio open
+    double elapsed = (double)(ts.tv_sec - handler->start_sec) +
+                     (double)(ts.tv_nsec - handler->start_nsec) / 1e9;
+
     if (secs) {
-      *secs = 0;
+      *secs = (time_t)elapsed;
     }
 
     if (frac_secs) {
-      *frac_secs = 0;
+      *frac_secs = elapsed - (time_t)elapsed;
     }
   }
 }
