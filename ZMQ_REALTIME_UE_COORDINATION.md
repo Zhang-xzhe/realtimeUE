@@ -9,6 +9,7 @@
 - **UE 接收并处理样本，其 slot 节奏自然跟随 gNB 发送节奏。**
 - gNB 到 UE 的传输延迟由 UE 侧缓冲吸收。
 - 双方机器时间通过 PTP 同步。
+  > **注意：** 在本 UE 机器上实测发现，系统时钟无法通过 `phc2sys` 稳定同步到 PTP 硬件时钟（PHC 与系统时钟频率偏差约 955 ppm，超出 Linux `adjtime` ±500 ppm 调整上限）。因此 UE 侧 `rf_zmq_get_time()` 使用 **`CLOCK_MONOTONIC`** 提供相对时间基准，不依赖 `CLOCK_REALTIME`。UE 的 slot 节奏仍由 gNB 经 ZMQ 发送的样本流驱动，不影响最小可行验证。
 
 **重要说明：** UE 使用 **srsRAN_4G** 项目，与 gNB 的 srsRAN_Project 是**两个不同的代码库**。UE 的 ZMQ radio 是 C 代码，架构和 gNB 不同，因此 UE 侧只需要改 `rf_zmq_get_time()`，不需要像 gNB 那样改 busy-wait。
 
