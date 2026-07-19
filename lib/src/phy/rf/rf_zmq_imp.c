@@ -265,8 +265,8 @@ int rf_zmq_open_multi(char* args, void** h, uint32_t nof_channels)
 
     rf_zmq_opts_t rx_opts = {};
     rf_zmq_opts_t tx_opts = {};
-    rx_opts.socket_type   = ZMQ_REQ;
-    tx_opts.socket_type   = ZMQ_REP;
+    rx_opts.socket_type   = ZMQ_PULL;
+    tx_opts.socket_type   = ZMQ_PUSH;
     tx_opts.id            = handler->id;
     rx_opts.id            = handler->id;
 
