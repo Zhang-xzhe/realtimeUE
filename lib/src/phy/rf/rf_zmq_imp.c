@@ -24,6 +24,7 @@
 #include "rf_plugin.h"
 #include "rf_zmq_imp_trx.h"
 #include <math.h>
+#include <stdio.h>
 #include <srsran/phy/common/phy_common.h>
 #include <srsran/phy/common/timestamp.h>
 #include <srsran/phy/utils/vector.h>
@@ -78,6 +79,39 @@ static void update_rates(rf_zmq_handler_t* handler, double srate);
  * Static Atributes
  */
 const char zmq_devname[4] = "zmq";
+
+// Diagnostic timing log helpers.
+static pthread_mutex_t ue_timing_log_mutex = PTHREAD_MUTEX_INITIALIZER;
+static FILE*           ue_timing_log_file  = NULL;
+
+static FILE* get_ue_timing_log_file(void)
+{
+  if (ue_timing_log_file == NULL) {
+    ue_timing_log_file = fopen("/tmp/ue_zmq_timing.csv", "w");
+    if (ue_timing_log_file != NULL) {
+      setlinebuf(ue_timing_log_file);
+      fprintf(ue_timing_log_file, "time_us,event,extra\n");
+    }
+  }
+  return ue_timing_log_file;
+}
+
+static long ue_wall_time_us(void)
+{
+  struct timespec ts;
+  clock_gettime(CLOCK_REALTIME, &ts);
+  return (long)ts.tv_sec * 1000000L + (long)ts.tv_nsec / 1000L;
+}
+
+static void ue_log_event(const char* event, const char* extra)
+{
+  pthread_mutex_lock(&ue_timing_log_mutex);
+  FILE* f = get_ue_timing_log_file();
+  if (f != NULL) {
+    fprintf(f, "%ld,%s,%s\n", ue_wall_time_us(), event, extra ? extra : "");
+  }
+  pthread_mutex_unlock(&ue_timing_log_mutex);
+}
 
 /*
  * Static methods
@@ -605,6 +639,14 @@ void rf_zmq_get_time(void* h, time_t* secs, double* frac_secs)
     if (frac_secs) {
       *frac_secs = elapsed - (time_t)elapsed;
     }
+
+    // Diagnostic logging: sample every 1000th call.
+    static unsigned counter = 0;
+    if ((counter++ % 1000) == 0) {
+      char extra[64];
+      snprintf(extra, sizeof(extra), "elapsed=%.6f", elapsed);
+      ue_log_event("rf_zmq_get_time", extra);
+    }
   }
 }
 
@@ -698,6 +740,14 @@ int rf_zmq_recv_with_time_multi(void* h, void** data, uint32_t nsamples, bool bl
     uint32_t nsamples_baserate = nsamples * decim_factor;
 
     rf_zmq_info(handler->id, "Rx %d samples (%d B)\n", nsamples, nbytes);
+
+    // Diagnostic logging: sample every 100th RX.
+    static unsigned rx_counter = 0;
+    if ((rx_counter++ % 100) == 0) {
+      char extra[64];
+      snprintf(extra, sizeof(extra), "nsamples=%u", nsamples);
+      ue_log_event("rf_zmq_rx", extra);
+    }
 
     // set timestamp for this reception
     if (secs != NULL && frac_secs != NULL) {
@@ -927,6 +977,14 @@ int rf_zmq_send_timed_multi(void*  h,
     }
 
     rf_zmq_info(handler->id, "Tx %d samples (%d B)\n", nsamples, nbytes);
+
+    // Diagnostic logging: sample every 100th TX.
+    static unsigned tx_counter = 0;
+    if ((tx_counter++ % 100) == 0) {
+      char extra[64];
+      snprintf(extra, sizeof(extra), "nsamples=%d", nsamples);
+      ue_log_event("rf_zmq_tx", extra);
+    }
 
     // return if transmitter is switched off
     if (handler->tx_off) {
