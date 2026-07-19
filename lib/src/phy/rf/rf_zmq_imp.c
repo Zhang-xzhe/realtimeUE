@@ -296,6 +296,8 @@ int rf_zmq_open_multi(char* args, void** h, uint32_t nof_channels)
       if (parse_string(args, "rx_type", -1, tmp) == SRSRAN_SUCCESS) {
         if (!strcmp(tmp, "sub")) {
           rx_opts.socket_type = ZMQ_SUB;
+        } else if (!strcmp(tmp, "pull")) {
+          rx_opts.socket_type = ZMQ_PULL;
         } else {
           printf("Unsupported socket type %s\n", tmp);
           goto clean_exit;
@@ -317,6 +319,8 @@ int rf_zmq_open_multi(char* args, void** h, uint32_t nof_channels)
       if (parse_string(args, "tx_type", -1, tmp) == SRSRAN_SUCCESS) {
         if (!strcmp(tmp, "pub")) {
           tx_opts.socket_type = ZMQ_PUB;
+        } else if (!strcmp(tmp, "push")) {
+          tx_opts.socket_type = ZMQ_PUSH;
         } else {
           printf("Unsupported socket type %s\n", tmp);
           goto clean_exit;
