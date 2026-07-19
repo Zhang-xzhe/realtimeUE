@@ -20,6 +20,57 @@
  */
 
 #include "srsue/hdr/phy/nr/slot_sync.h"
+#include <chrono>
+#include <cstdarg>
+#include <cstdio>
+#include <mutex>
+
+namespace {
+std::mutex& get_slot_timing_log_mutex()
+{
+  static std::mutex m;
+  return m;
+}
+
+FILE* get_slot_timing_log_file()
+{
+  static FILE* f = []() {
+    FILE* fp = std::fopen("/tmp/ue_slot_timing.csv", "w");
+    if (fp != nullptr) {
+      setlinebuf(fp);
+      fprintf(fp, "time_us,event,extra\n");
+    }
+    return fp;
+  }();
+  return f;
+}
+
+long slot_wall_time_us()
+{
+  return std::chrono::duration_cast<std::chrono::microseconds>(
+             std::chrono::system_clock::now().time_since_epoch())
+      .count();
+}
+
+void slot_log_event(const char* event, const char* extra)
+{
+  std::lock_guard<std::mutex> lock(get_slot_timing_log_mutex());
+  FILE* f = get_slot_timing_log_file();
+  if (f != nullptr) {
+    fprintf(f, "%ld,%s,%s\n", slot_wall_time_us(), event, extra ? extra : "");
+  }
+}
+
+void slot_log_event_fmt(const char* event, const char* fmt, ...)
+{
+  char    extra[256];
+  va_list args;
+  va_start(args, fmt);
+  vsnprintf(extra, sizeof(extra), fmt, args);
+  va_end(args);
+  slot_log_event(event, extra);
+}
+} // namespace
 
 namespace srsue {
 namespace nr {
@@ -94,10 +145,14 @@ int slot_sync::recv_callback(srsran::rf_buffer_t& data, srsran_timestamp_t* rx_t
   srsran::rf_timestamp_t  dummy_ts     = {};
   srsran::rf_timestamp_t& rf_timestamp = (rx_time == nullptr) ? dummy_ts : last_rx_time;
 
+  long t0 = slot_wall_time_us();
+
   // Receive
   if (not radio->rx_now(data, rf_timestamp)) {
+    slot_log_event("recv_callback_rx_now_fail", "");
     return SRSRAN_ERROR;
   }
+  long t_after_rx = slot_wall_time_us();
 
   srsran_timestamp_t dummy_flat_ts = {};
 
@@ -113,6 +168,14 @@ int slot_sync::recv_callback(srsran::rf_buffer_t& data, srsran_timestamp_t* rx_t
   // Run stack if the sync state is not in camping
   logger.debug("run_stack_tti: from recv");
   run_stack_tti();
+  long t_after_stack = slot_wall_time_us();
+
+  slot_log_event_fmt("recv_callback",
+                     "rx_us=%ld stack_us=%ld total_us=%ld nsamples=%d",
+                     t_after_rx - t0,
+                     t_after_stack - t_after_rx,
+                     t_after_stack - t0,
+                     data.get_nof_samples());
 
   logger.debug("SYNC:  received %d samples from radio", data.get_nof_samples());
 
@@ -139,12 +202,16 @@ bool slot_sync::run_sfn_sync()
 
 bool slot_sync::run_camping(srsran::rf_buffer_t& buffer, srsran::rf_timestamp_t& timestamp)
 {
+  long t0 = slot_wall_time_us();
+
   // Run UE SYNC process using an external baseband buffer
   srsran_ue_sync_nr_outcome_t outcome = {};
   if (srsran_ue_sync_nr_zerocopy(&ue_sync_nr, buffer.to_cf_t(), &outcome) < SRSRAN_SUCCESS) {
     logger.error("SYNC: error in zerocopy");
     return false;
   }
+
+  long t1 = slot_wall_time_us();
 
   // If in sync, update slot index
   if (outcome.in_sync) {
@@ -153,6 +220,14 @@ bool slot_sync::run_camping(srsran::rf_buffer_t& buffer, srsran::rf_timestamp_t&
 
   // Set RF timestamp
   *timestamp.get_ptr(0) = outcome.timestamp;
+
+  slot_log_event_fmt("run_camping",
+                     "zerocopy_us=%ld in_sync=%d sfn=%d sf_idx=%d ts=%f",
+                     t1 - t0,
+                     outcome.in_sync ? 1 : 0,
+                     outcome.sfn,
+                     outcome.sf_idx,
+                     srsran_timestamp_real(&outcome.timestamp));
 
   // Return true if the PHY in-sync
   return outcome.in_sync;

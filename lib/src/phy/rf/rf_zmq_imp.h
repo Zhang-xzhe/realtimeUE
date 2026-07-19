@@ -30,6 +30,12 @@
 
 #define DEVNAME_ZMQ "ZeroMQ"
 
+/* Diagnostic timing-log helpers, implemented in rf_zmq_imp.c */
+long ue_wall_time_us(void);
+long ue_mono_time_us(void);
+void ue_log_event(const char* event, const char* extra);
+void ue_log_event_fmt(const char* event, const char* fmt, ...);
+
 extern rf_dev_t srsran_rf_dev_zmq;
 
 SRSRAN_API int rf_zmq_open(char* args, void** handler);

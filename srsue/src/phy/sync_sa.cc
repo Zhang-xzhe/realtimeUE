@@ -21,6 +21,57 @@
 
 #include "srsue/hdr/phy/nr/sync_sa.h"
 #include "srsran/radio/rf_buffer.h"
+#include <chrono>
+#include <cstdarg>
+#include <cstdio>
+#include <mutex>
+
+namespace {
+std::mutex& get_phy_timing_log_mutex()
+{
+  static std::mutex m;
+  return m;
+}
+
+FILE* get_phy_timing_log_file()
+{
+  static FILE* f = []() {
+    FILE* fp = std::fopen("/tmp/ue_phy_timing.csv", "w");
+    if (fp != nullptr) {
+      setlinebuf(fp);
+      fprintf(fp, "time_us,event,extra\n");
+    }
+    return fp;
+  }();
+  return f;
+}
+
+long phy_wall_time_us()
+{
+  return std::chrono::duration_cast<std::chrono::microseconds>(
+             std::chrono::system_clock::now().time_since_epoch())
+      .count();
+}
+
+void phy_log_event(const char* event, const char* extra)
+{
+  std::lock_guard<std::mutex> lock(get_phy_timing_log_mutex());
+  FILE* f = get_phy_timing_log_file();
+  if (f != nullptr) {
+    fprintf(f, "%ld,%s,%s\n", phy_wall_time_us(), event, extra ? extra : "");
+  }
+}
+
+void phy_log_event_fmt(const char* event, const char* fmt, ...)
+{
+  char    extra[256];
+  va_list args;
+  va_start(args, fmt);
+  vsnprintf(extra, sizeof(extra), fmt, args);
+  va_end(args);
+  phy_log_event(event, extra);
+}
+} // namespace
 
 namespace srsue {
 namespace nr {
@@ -295,6 +346,8 @@ void sync_sa::run_state_sfn_sync()
 
 void sync_sa::run_state_cell_camping()
 {
+  long camp_t0 = phy_wall_time_us();
+
   nr::sf_worker* nr_worker = workers.wait_worker(tti);
   if (nr_worker == nullptr) {
     running = false;
@@ -311,6 +364,7 @@ void sync_sa::run_state_cell_camping()
     nr_worker->release();
     return;
   }
+  long camp_after_recv = phy_wall_time_us();
 
   srsran::phy_common_interface::worker_context_t context;
   context.sf_idx     = tti;
@@ -327,15 +381,30 @@ void sync_sa::run_state_cell_camping()
   tti_semaphore.push(nr_worker);
   workers.start_worker(nr_worker);
 
+  long camp_t1 = phy_wall_time_us();
+  phy_log_event_fmt("sync_camping_slot",
+                    "tti=%d recv_us=%ld setup_us=%ld total_us=%ld",
+                    tti,
+                    camp_after_recv - camp_t0,
+                    camp_t1 - camp_after_recv,
+                    camp_t1 - camp_t0);
+
   tti = TTI_ADD(tti, 1);
 }
 
 void sync_sa::run_thread()
 {
+  long loop_t0 = 0;
   while (running.load(std::memory_order_relaxed)) {
+    long loop_start = phy_wall_time_us();
+    if (loop_t0 == 0) {
+      loop_t0 = loop_start;
+    }
+
     logger.set_context(tti);
 
     logger.debug("SYNC:  state=%s, tti=%d", phy_state.to_string(), tti);
+    phy_log_event_fmt("sync_loop_start", "state=%s tti=%d delta_us=%ld", phy_state.to_string(), tti, loop_start - loop_t0);
 
     switch (phy_state.run_state()) {
       case sync_state::IDLE:
@@ -351,12 +420,18 @@ void sync_sa::run_thread()
         run_state_cell_camping();
         break;
     }
+
+    long loop_end = phy_wall_time_us();
+    phy_log_event_fmt("sync_loop_end", "state=%s tti=%d loop_us=%ld", phy_state.to_string(), tti, loop_end - loop_start);
+    loop_t0 = loop_start;
   }
 }
 void sync_sa::worker_end(const srsran::phy_common_interface::worker_context_t& w_ctx,
                          const bool&                                           tx_enable,
                          srsran::rf_buffer_t&                                  tx_buffer)
 {
+  long tx_t0 = phy_wall_time_us();
+
   // Wait for the green light to transmit in the current TTI
   tti_semaphore.wait(w_ctx.worker_ptr);
 
@@ -384,6 +459,9 @@ void sync_sa::worker_end(const srsran::phy_common_interface::worker_context_t& w
       radio->tx_end();
     }
   }
+
+  long tx_t1 = phy_wall_time_us();
+  phy_log_event_fmt("worker_tx", "tti=%d tx_enable=%d total_us=%ld", w_ctx.sf_idx, tx_enable, tx_t1 - tx_t0);
 
   // Allow next TTI to transmit
   tti_semaphore.release();

@@ -20,6 +20,7 @@
  */
 
 #include "rf_zmq_imp_trx.h"
+#include "rf_zmq_imp.h"
 #include <inttypes.h>
 #include <srsran/config.h>
 #include <srsran/phy/utils/vector.h>
@@ -106,7 +107,13 @@ clean_exit:
 
 static int _rf_zmq_tx_baseband(rf_zmq_tx_t* q, cf_t* buffer, uint32_t nsamples)
 {
-  int n = SRSRAN_ERROR;
+  int   n           = SRSRAN_ERROR;
+  int   retry_count = 0;
+  long  t0          = ue_wall_time_us();
+  long  mono_t0     = 0;
+  struct timespec ts0 = {};
+  clock_gettime(CLOCK_MONOTONIC, &ts0);
+  mono_t0 = (long)ts0.tv_sec * 1000000L + (long)ts0.tv_nsec / 1000L;
 
   while (n < 0 && q->running) {
     // Receive Transmit request is socket type is REPLY
@@ -141,8 +148,10 @@ static int _rf_zmq_tx_baseband(rf_zmq_tx_t* q, cf_t* buffer, uint32_t nsamples)
     if (n > 0) {
       n = zmq_send(q->sock, buf, (size_t)sample_sz * nsamples, 0);
       if (n < 0) {
+        retry_count++;
         if (rf_zmq_handle_error(q->id, "tx baseband send")) {
           n = SRSRAN_ERROR;
+          ue_log_event_fmt("tx_send_error", "retries=%d nsamples=%u", retry_count, nsamples);
           goto clean_exit;
         }
       } else if (n != NSAMPLES2NBYTES(nsamples)) {
@@ -162,6 +171,16 @@ static int _rf_zmq_tx_baseband(rf_zmq_tx_t* q, cf_t* buffer, uint32_t nsamples)
   // Increment sample counter
   q->nsamples += nsamples;
   n = nsamples;
+
+  struct timespec ts1 = {};
+  clock_gettime(CLOCK_MONOTONIC, &ts1);
+  long mono_t1 = (long)ts1.tv_sec * 1000000L + (long)ts1.tv_nsec / 1000L;
+  ue_log_event_fmt("tx_baseband_send",
+                   "wall=%ld mono_us=%ld retries=%d nsamples=%u",
+                   t0,
+                   mono_t1 - mono_t0,
+                   retry_count,
+                   nsamples);
 
 clean_exit:
   return n;

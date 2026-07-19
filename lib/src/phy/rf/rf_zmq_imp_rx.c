@@ -20,6 +20,7 @@
  */
 
 #include "rf_zmq_imp_trx.h"
+#include "rf_zmq_imp.h"
 #include <inttypes.h>
 #include <srsran/phy/utils/vector.h>
 #include <stdlib.h>
@@ -53,6 +54,7 @@ static void* rf_zmq_async_rx_thread(void* h)
     }
 
     // Receive baseband
+    long rx_t0 = ue_mono_time_us();
     for (n = (n < 0) ? 0 : -1; n < 0 && rf_zmq_rx_is_running(q);) {
       n = zmq_recv(q->sock, q->temp_buffer, ZMQ_MAX_BUFFER_SIZE, 0);
       if (n == -1) {
@@ -71,6 +73,8 @@ static void* rf_zmq_async_rx_thread(void* h)
         nbytes = n;
       }
     }
+    long rx_after_recv = ue_mono_time_us();
+    ue_log_event_fmt("async_rx_recv", "recv_us=%ld nbytes=%d", rx_after_recv - rx_t0, nbytes);
 
     // Write received data in buffer
     if (nbytes > 0) {
@@ -84,13 +88,17 @@ static void* rf_zmq_async_rx_thread(void* h)
         }
       }
 
+      long rx_after_rb = ue_mono_time_us();
+      int  rb_status   = srsran_ringbuffer_status(&q->ringbuffer);
+      ue_log_event_fmt("async_rx_rb", "write_us=%ld nbytes=%d ring=%d", rx_after_rb - rx_after_recv, nbytes, NBYTES2NSAMPLES(rb_status));
+
       // Check write
       if (nbytes == n) {
         rf_zmq_info(q->id,
                     "   - received %d baseband samples (%d B). %d samples available.\n",
                     NBYTES2NSAMPLES(n),
                     n,
-                    NBYTES2NSAMPLES(srsran_ringbuffer_status(&q->ringbuffer)));
+                    NBYTES2NSAMPLES(rb_status));
       }
     }
   }

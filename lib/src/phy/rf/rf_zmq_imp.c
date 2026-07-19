@@ -87,7 +87,7 @@ static FILE*           ue_timing_log_file  = NULL;
 static FILE* get_ue_timing_log_file(void)
 {
   if (ue_timing_log_file == NULL) {
-    ue_timing_log_file = fopen("/tmp/ue_zmq_timing.csv", "w");
+    ue_timing_log_file = fopen("/tmp/ue_zmq_timing2.csv", "w");
     if (ue_timing_log_file != NULL) {
       setlinebuf(ue_timing_log_file);
       fprintf(ue_timing_log_file, "time_us,event,extra\n");
@@ -96,14 +96,21 @@ static FILE* get_ue_timing_log_file(void)
   return ue_timing_log_file;
 }
 
-static long ue_wall_time_us(void)
+long ue_wall_time_us(void)
 {
   struct timespec ts;
   clock_gettime(CLOCK_REALTIME, &ts);
   return (long)ts.tv_sec * 1000000L + (long)ts.tv_nsec / 1000L;
 }
 
-static void ue_log_event(const char* event, const char* extra)
+long ue_mono_time_us(void)
+{
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (long)ts.tv_sec * 1000000L + (long)ts.tv_nsec / 1000L;
+}
+
+void ue_log_event(const char* event, const char* extra)
 {
   pthread_mutex_lock(&ue_timing_log_mutex);
   FILE* f = get_ue_timing_log_file();
@@ -111,6 +118,16 @@ static void ue_log_event(const char* event, const char* extra)
     fprintf(f, "%ld,%s,%s\n", ue_wall_time_us(), event, extra ? extra : "");
   }
   pthread_mutex_unlock(&ue_timing_log_mutex);
+}
+
+void ue_log_event_fmt(const char* event, const char* fmt, ...)
+{
+  char    extra[256];
+  va_list args;
+  va_start(args, fmt);
+  vsnprintf(extra, sizeof(extra), fmt, args);
+  va_end(args);
+  ue_log_event(event, extra);
 }
 
 /*
@@ -259,7 +276,7 @@ int rf_zmq_open_multi(char* args, void** h, uint32_t nof_channels)
 
     // Initialize time reference for rf_zmq_get_time
     struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
+    clock_gettime(CLOCK_REALTIME, &ts);
     handler->start_sec  = ts.tv_sec;
     handler->start_nsec = ts.tv_nsec;
 
@@ -630,7 +647,7 @@ void rf_zmq_get_time(void* h, time_t* secs, double* frac_secs)
     rf_zmq_handler_t* handler = (rf_zmq_handler_t*)h;
 
     struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
+    clock_gettime(CLOCK_REALTIME, &ts);
 
     // Calculate elapsed seconds since radio open
     double elapsed = (double)(ts.tv_sec - handler->start_sec) +
@@ -647,9 +664,7 @@ void rf_zmq_get_time(void* h, time_t* secs, double* frac_secs)
     // Diagnostic logging: sample every 1000th call.
     static unsigned counter = 0;
     if ((counter++ % 1000) == 0) {
-      char extra[64];
-      snprintf(extra, sizeof(extra), "elapsed=%.6f", elapsed);
-      ue_log_event("rf_zmq_get_time", extra);
+      ue_log_event_fmt("rf_zmq_get_time", "elapsed=%.6f", elapsed);
     }
   }
 }
@@ -784,8 +799,14 @@ int rf_zmq_recv_with_time_multi(void* h, void** data, uint32_t nsamples, bool bl
     rf_zmq_info(handler->id, " - next rx time: %d + %.3f\n", ts_rx.full_secs, ts_rx.frac_secs);
     rf_zmq_info(handler->id, " - next tx time: %d + %.3f\n", ts_tx.full_secs, ts_tx.frac_secs);
 
+    long rx_t0 = ue_mono_time_us();
+    ue_log_event_fmt("rx_start", "nsamples=%u base=%u next_rx_ts=%" PRIu64, nsamples, nsamples_baserate, handler->next_rx_ts);
+
     // Leave time for the Tx to transmit
     usleep((1000000UL * nsamples_baserate) / handler->base_srate);
+
+    long rx_t_after_usleep = ue_mono_time_us();
+    ue_log_event_fmt("rx_after_usleep", "usleep_us=%ld", rx_t_after_usleep - rx_t0);
 
     // check for tx gap if we're also transmitting on this radio
     for (int i = 0; i < handler->nof_channels; i++) {
@@ -850,10 +871,17 @@ int rf_zmq_recv_with_time_multi(void* h, void** data, uint32_t nsamples, bool bl
       // Check if all channels are completed
       completed = (completed_count == handler->nof_channels);
     }
+    long rx_t_after_baseband = ue_mono_time_us();
+    int  ring_status         = srsran_ringbuffer_status(&handler->receiver[0].ringbuffer);
+    ue_log_event_fmt("rx_after_baseband",
+                     "total_us=%ld retrieved=%d ring=%d",
+                     rx_t_after_baseband - rx_t0,
+                     count[0],
+                     NBYTES2NSAMPLES(ring_status));
     rf_zmq_info(handler->id,
                 " - read %d samples. %d samples available\n",
                 NBYTES2NSAMPLES(nbytes),
-                NBYTES2NSAMPLES(srsran_ringbuffer_status(&handler->receiver[0].ringbuffer)));
+                NBYTES2NSAMPLES(ring_status));
 
     // decimate if needed
     if (decim_factor != 1) {
@@ -982,12 +1010,13 @@ int rf_zmq_send_timed_multi(void*  h,
 
     rf_zmq_info(handler->id, "Tx %d samples (%d B)\n", nsamples, nbytes);
 
+    long tx_t0 = ue_mono_time_us();
+    ue_log_event_fmt("tx_start", "nsamples=%d has_time=%d secs=%ld frac=%.6f", nsamples, has_time_spec, secs, frac_secs);
+
     // Diagnostic logging: sample every 100th TX.
     static unsigned tx_counter = 0;
     if ((tx_counter++ % 100) == 0) {
-      char extra[64];
-      snprintf(extra, sizeof(extra), "nsamples=%d", nsamples);
-      ue_log_event("rf_zmq_tx", extra);
+      ue_log_event_fmt("rf_zmq_tx", "nsamples=%d", nsamples);
     }
 
     // return if transmitter is switched off
@@ -1067,6 +1096,9 @@ int rf_zmq_send_timed_multi(void*  h,
         }
       }
     }
+
+    long tx_t1 = ue_mono_time_us();
+    ue_log_event_fmt("tx_end", "total_us=%ld", tx_t1 - tx_t0);
   }
 
   ret = SRSRAN_SUCCESS;
